@@ -2,17 +2,18 @@ from fastapi import FastAPI, Request
 from time import time
 from fastapi.responses import JSONResponse
 from configuration import collection
-from database.schema import log_data
+from math import ceil
+import os
 
 app = FastAPI()
 
-time_limit = 5
-requests_no = 3
+time_limit = os.getenv("TIME_LIMIT")
+requests_no = os.getenv("REQUESTS_NO")
 
 
 @app.middleware("http")
 async def rate_limiter(req: Request, call_next):
-    # current time and ip address
+    # current time and ip address of device requesting
     ip = req.client.host
     ct = time()  
 
@@ -31,7 +32,7 @@ async def rate_limiter(req: Request, call_next):
                 updated_log.append(t)
         log_entry["times"] = updated_log
         log_entry["times"].append(ct)
-        collection.update_one({"ip":ip},{"$set": log_entry})
+        collection.find_one_and_update_one({"ip":ip},{"$set": log_entry})
 
         if len(log_entry["times"]) <= requests_no:
             res = await call_next(req)
@@ -41,8 +42,13 @@ async def rate_limiter(req: Request, call_next):
         "Status Code" : 429,
         "Error" : "Too many requests"
     }
-    return JSONResponse(status_code= 429,content = res)
 
+    retry_after = max(1, ceil(min(log_entry["times"]) + float(time_limit) - ct))
+    return JSONResponse(
+        status_code=429,
+        content=res,
+        headers={"Retry-After": str(retry_after)}
+    )
 
 
 @app.get('/')
@@ -50,4 +56,3 @@ def home():
     return JSONResponse({
         "message" : "Welcome"
     })
-
