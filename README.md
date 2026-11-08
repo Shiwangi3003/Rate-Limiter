@@ -3,50 +3,113 @@
 A FastAPI middleware-based **Rate Limiter** that restricts the number of requests per IP address within a defined time window, backed by **MongoDB**.
 
 ---
+✨ **Features**
+- **Sliding-window limiting** per client IP (timestamps are stored and pruned on every request)
+- **Configurable** window size and request cap via environment variables
+- **Retry-After header** on 429 responses so clients know when to try again
+- **Optional redirect mode:** send every allowed request to a URL of your choice
+- **Persistent counters** in MongoDB, so limits survive server restarts and are shared across app instances
+- Drop-in middleware: no changes needed to your route handlers
 
 ## 🚀 Tech Stack
 
-- **Framework:** FastAPI
-- **Database:** MongoDB (via PyMongo)
-- **Language:** Python 3.x
-- **Middleware:** HTTP Rate Limiting
+ Layer | Technology |
+|-------|------------|
+| Framework | [FastAPI](https://fastapi.tiangolo.com/) |
+| Server | [Uvicorn](https://www.uvicorn.org/) |
+| Database | [MongoDB](https://www.mongodb.com/) via [PyMongo](https://pymongo.readthedocs.io/) |
+| Config | [python-dotenv](https://github.com/theskumar/python-dotenv) |
+| Language | Python 3.9+ |
 
 ---
 
 ## ⚙️ Setup & Installation
 
+### Prerequisites
+ 
+- Python 3.9 or newer
+- A MongoDB instance: [MongoDB Atlas](https://www.mongodb.com/atlas) (free tier works) or a local `mongod`
+
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/your-username/rate-limiter-api.git
-   cd rate-limiter-api
+   git clone https://github.com/your-username/Rate-Limiter.git
+   cd Rate-Limiter
    ```
 
-2. **Install dependencies**
+2. **Create a virtual environment and install dependencies**
    ```bash
-   pip install fastapi pymongo uvicorn
+   python -m venv venv
+   pip install -r requirements.txt
    ```
 
-3. **Configure MongoDB connection**
-   Update your MongoDB URI and collection name in `configuration.py`.
+3. **Configure environment variables**
+   Create a `.env` file in the project root (it is already git-ignored):
+ 
+```env
+# Required
+MONGODB_URL=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority
+ 
+# Optional (defaults shown)
+TIME_LIMIT=5
+REQUESTS_NO=3
+# REDIRECT_URL=https://example.com
+```
 
-4. **Run the server**
+5. **Run the server**
    ```bash
    uvicorn main:app --reload
    ```
 
-5. **Access the interactive docs**
+6. **Access the interactive docs**
    - Swagger UI: [http://localhost:8000/docs](http://localhost:8000/docs)
    - ReDoc: [http://localhost:8000/redoc](http://localhost:8000/redoc)
 
 ---
 
-## ⚙️ Rate Limiter Configuration
+## ⚙️ Configuration
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `time_limit` | `5` seconds | Time window for request tracking |
-| `requests_no` | `3` | Max allowed requests per IP within the time window |
-
+All settings come from environment variables.
+ 
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `MONGODB_URL` | ✅ Yes | none | MongoDB connection string |
+| `TIME_LIMIT` | No | `5` | Length of the sliding window, in **seconds** (floats allowed) |
+| `REQUESTS_NO` | No | `3` | Max requests allowed per IP within the window |
+| `REDIRECT_URL` | No | unset | If set, every *allowed* request is answered with a `302` redirect to this URL instead of reaching the route handler |
+ 
+**Database layout:** database `rates_db`, collection `rates_db`. Each document looks like:
+ 
+```json
+{
+  "ip": "203.0.113.42",
+  "times": [1731050000.12, 1731050001.48, 1731050002.97]
+}
+```
+ 
+`times` holds Unix timestamps of the client's recent requests.
+ 
+---
+ 
+## 🛡️ How It Works
+ 
+```mermaid
+flowchart TD
+    A[Incoming request] --> B[Read client IP + current time]
+    B --> C{IP in MongoDB?}
+    C -- No --> D[Insert IP with its first timestamp]
+    D --> G[Allow request]
+    C -- Yes --> E[Drop timestamps older than TIME_LIMIT<br/>append current timestamp, save]
+    E --> F{count ≤ REQUESTS_NO?}
+    F -- Yes --> G
+    F -- No --> H[Return 429 + Retry-After]
+    G --> I{REDIRECT_URL set?}
+    I -- Yes --> J[302 redirect]
+    I -- No --> K[Run route handler]
+```
+ 
+In short, with the defaults (`TIME_LIMIT=5`, `REQUESTS_NO=3`), a client can make **3 requests in any 5-second window**. The 4th request inside that window is rejected.
+ 
+---
 ---
 
 ## 🔌 API Endpoints
@@ -69,33 +132,37 @@ Returns a welcome message.
 
 ---
 
-## 🛡️ Middleware — Rate Limiter
-
-Every incoming HTTP request passes through the `rate_limiter` middleware:
-
-- Extracts the client's **IP address** and **current timestamp**.
-- Looks up the IP in MongoDB.
-- If the IP is **new**, it logs the request and allows it through.
-- If the IP **exists**, it filters out timestamps older than `time_limit` seconds and checks the count.
-- If requests within the window are within `requests_no`, the request is allowed.
-- If the limit is **exceeded**, a `429 Too Many Requests` response is returned.
-
-**Response `429`:**
+### Rate-limited response
+ 
+When a client exceeds the limit, any endpoint returns:
+ 
+**Response `429 Too Many Requests`**
+ 
 ```json
 {
   "Status Code": 429,
   "Error": "Too many requests"
 }
 ```
-
+ 
+Headers:
+ 
+| Header | Description |
+|--------|-------------|
+| `Retry-After` | Minimum number of seconds (at least 1) until the client's oldest request leaves the window |
+ 
 ---
+ 
 
 ## ⚠️ Known Limitations
 
-- Rate limit counters are stored in MongoDB; high traffic may introduce slight latency.
-- No per-route rate limiting — the limit applies globally to all endpoints.
+- **Rejected requests still count.** The current timestamp is recorded even when a request is blocked, so a client that keeps hammering the API stays blocked until it stops for a full `TIME_LIMIT` window.
+- **Global limit only.** The same limit applies to every route; there is no per-endpoint or per-user configuration.
+- **IP detection.** The limiter uses `request.client.host`. Behind a reverse proxy or load balancer this may be the proxy's IP unless you configure forwarded headers (e.g. `uvicorn --proxy-headers`).
+- **Not atomic.** The read-modify-write against MongoDB is not atomic, so heavy concurrent traffic from one IP can briefly slip past the limit.
+- **Stale data accumulates.** Documents for IPs that stop visiting are never removed. Consider a cleanup job or a TTL index.
+- **Extra latency.** Every request makes at least one round trip to MongoDB.
 - No authentication or authorization is implemented.
-
 ---
 
 ## 📄 License
