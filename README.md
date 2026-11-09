@@ -52,6 +52,7 @@ MONGODB_URL=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=t
 # Optional (defaults shown)
 TIME_LIMIT=5
 REQUESTS_NO=3
+
 # REDIRECT_URL=https://example.com
 ```
 
@@ -90,27 +91,6 @@ All settings come from environment variables.
  
 ---
  
-## 🛡️ How It Works
- 
-```mermaid
-flowchart TD
-    A[Incoming request] --> B[Read client IP + current time]
-    B --> C{IP in MongoDB?}
-    C -- No --> D[Insert IP with its first timestamp]
-    D --> G[Allow request]
-    C -- Yes --> E[Drop timestamps older than TIME_LIMIT<br/>append current timestamp, save]
-    E --> F{count ≤ REQUESTS_NO?}
-    F -- Yes --> G
-    F -- No --> H[Return 429 + Retry-After]
-    G --> I{REDIRECT_URL set?}
-    I -- Yes --> J[302 redirect]
-    I -- No --> K[Run route handler]
-```
- 
-In short, with the defaults (`TIME_LIMIT=5`, `REQUESTS_NO=3`), a client can make **3 requests in any 5-second window**. The 4th request inside that window is rejected.
- 
----
----
 
 ## 🔌 API Endpoints
 
